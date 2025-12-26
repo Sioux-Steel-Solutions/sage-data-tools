@@ -32,7 +32,8 @@ export async function enumerateTables(): Promise<
   Array<{ name: string; type: 'TABLE' | 'VIEW' }>
 > {
   const conn = await connect();
-  const result = await conn.request().query(`EXEC sp_tables_ex 'SAGE'`);
+  const linkedServer = config.sql.linkedServer;
+  const result = await conn.request().query(`EXEC sp_tables_ex '${linkedServer}'`);
 
   return result.recordset.map((row: Record<string, unknown>) => ({
     name: row.TABLE_NAME as string,
@@ -45,7 +46,8 @@ export async function smokeTestTable(
 ): Promise<{ success: boolean; columns?: ColumnMetadata[]; error?: string }> {
   try {
     const conn = await connect();
-    const query = `SELECT TOP 1 * FROM OPENQUERY(SAGE, 'SELECT * FROM ${tableName}')`;
+    const linkedServer = config.sql.linkedServer;
+    const query = `SELECT TOP 1 * FROM OPENQUERY(${linkedServer}, 'SELECT * FROM ${tableName}')`;
     const result = await conn.request().query(query);
 
     const columns: ColumnMetadata[] = Object.keys(
@@ -84,7 +86,8 @@ export async function* streamTableRows(
   const request = conn.request();
   request.stream = true;
 
-  const query = `SELECT * FROM OPENQUERY(SAGE, 'SELECT * FROM ${tableName}')`;
+  const linkedServer = config.sql.linkedServer;
+  const query = `SELECT * FROM OPENQUERY(${linkedServer}, 'SELECT * FROM ${tableName}')`;
 
   request.query(query);
 
@@ -123,28 +126,33 @@ export async function* streamTableRows(
     } else if (done) {
       return;
     } else {
-      yield await new Promise<Record<string, unknown>>((resolve) => {
+      const row = await new Promise<Record<string, unknown> | null>((resolve) => {
         if (rows.length > 0) {
           resolve(rows.shift()!);
         } else if (done) {
-          resolve(undefined as unknown as Record<string, unknown>);
+          resolve(null);
         } else {
           resolveNext = (result) => {
             if (result.done) {
-              resolve(undefined as unknown as Record<string, unknown>);
+              resolve(null);
             } else {
               resolve(result.value);
             }
           };
         }
       });
+      if (row === null) {
+        return;
+      }
+      yield row;
     }
   }
 }
 
 export async function getTableRowCount(tableName: string): Promise<number> {
   const conn = await connect();
-  const query = `SELECT COUNT(*) as cnt FROM OPENQUERY(SAGE, 'SELECT * FROM ${tableName}')`;
+  const linkedServer = config.sql.linkedServer;
+  const query = `SELECT COUNT(*) as cnt FROM OPENQUERY(${linkedServer}, 'SELECT * FROM ${tableName}')`;
   const result = await conn.request().query(query);
   return result.recordset[0].cnt;
 }
