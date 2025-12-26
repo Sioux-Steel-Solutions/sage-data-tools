@@ -1,0 +1,28 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Environment files (contains credentials)
+.env
+.env.local
+.env.*.local
+
+# Exports output
+exports/
+
+# Manifest files (may contain sensitive table info)
+manifest.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*

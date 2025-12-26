@@ -1,0 +1,375 @@
+Project Plan
+Sage / ProvideX Read-Only Data Extraction & Validation Tool
+Project Overview
+
+This project defines a controlled, read-only data extraction initiative targeting the Sage ERP environment backed by a ProvideX instance. The primary objective is to safely and exhaustively export all accessible tables from the Sage data source without prior knowledge of schema, while ensuring data integrity, completeness, and repeatability.
+
+Due to the age and sensitivity of the underlying ProvideX infrastructure, this project intentionally favors serial execution, conservative load behavior, and full observability over speed or concurrency.
+
+The output of this project will be a complete, auditable XLSX-based snapshot of all queryable Sage tables, suitable for downstream analysis, migration, or schema discovery.
+
+Key Constraints & Assumptions
+
+Read-only access only
+
+No prior schema knowledge
+
+Tables may vary wildly in:
+
+column count
+
+column names
+
+data types
+
+row counts
+
+Some tables may:
+
+fail to query
+
+hang
+
+expose inconsistent metadata
+
+ProvideX infrastructure is assumed to be fragile under concurrency
+
+This project is executed during a low-traffic window to minimize operational risk
+
+Tooling & Implementation Requirements
+Language & Runtime
+
+TypeScript
+
+Node.js runtime
+
+Configuration
+
+Connection details are provided via environment variables (.env file):
+
+  - SAGE_SQL_HOST: SQL Server host (e.g., 192.168.200.10)
+  - SAGE_SQL_PORT: SQL Server port (default 1433)
+  - SAGE_SQL_DATABASE: Database name
+  - SAGE_SQL_USER: Username for SQL authentication
+  - SAGE_SQL_PASSWORD: Password for SQL authentication
+  - SAGE_SQL_ENCRYPT: Enable encryption (true/false)
+  - SAGE_SQL_TRUST_SERVER_CERT: Trust server certificate (true/false)
+
+Execution controls:
+  - MAX_CONCURRENCY: Always 1 (enforced serial execution)
+  - SLEEP_BETWEEN_TABLES_MS: Delay between tables (default 500ms)
+
+The tool loads these via dotenv at startup.
+
+Execution Model
+
+Command-line application
+
+Serial execution only (no parallel queries)
+
+User Interface
+
+Text-based TUI
+
+Built using:
+
+ink (React-style terminal UI)
+
+chalk (colorized status output)
+
+Clear visual indicators for:
+
+current table
+
+phase (discovery / extraction / validation)
+
+success, failure, warnings
+
+progress through table list
+
+Output Format
+
+All data exported as .xlsx files
+
+One directory per table
+
+Sidecar metadata included per table
+
+Large Table Handling (XLSX Limits)
+
+Excel has a hard limit of ~1,048,576 rows per sheet. For tables exceeding this:
+
+Tables are split into multiple sheets within the same workbook
+
+Sheets are named: <TableName>_Part1, <TableName>_Part2, etc.
+
+The stats.json file records:
+
+  - Total row count across all sheets
+  - Number of sheets created
+  - Row count per sheet
+
+Phase 2 validation sums rows across all sheets to verify against source COUNT(*)
+
+Data Source Discovery
+Initial Table Enumeration
+
+The tool begins by enumerating all tables and views exposed by the Sage data source using:
+
+EXEC sp_tables_ex 'SAGE';
+
+
+This produces a result set similar to:
+
+TABLE_CAT	TABLE_SCHEM	TABLE_NAME	TABLE_TYPE	REMARKS
+NULL	NULL	AP_ACHCheckEntry	TABLE	NULL
+NULL	NULL	AP_ACHFileWrk	TABLE	NULL
+NULL	NULL	AP_ACHGenerationAddenda	TABLE	NULL
+...	...	...	...	...
+
+Given the potentially thousands of results, this output is programmatically normalized into a Table Manifest, which becomes the authoritative control file for the entire run.
+
+Table Manifest
+
+Each table entry in the manifest tracks:
+
+Table name
+
+Table type (TABLE / VIEW)
+
+Processing status
+
+Errors or warnings
+
+Row counts
+
+Column metadata
+
+Timing information
+
+The manifest enables:
+
+deterministic execution
+
+restartability
+
+post-run auditing
+
+failure isolation
+
+Processing Phases
+
+Each table undergoes three structured passes.
+
+Phase 0 — Discovery / Smoke Test
+Purpose
+
+Determine whether a table is queryable at all, without attempting to extract data.
+
+Query Pattern
+
+A minimal query is issued via OPENQUERY:
+
+SELECT *
+FROM OPENQUERY(SAGE,
+  'SELECT * FROM <TableName>');
+
+
+(Optionally constrained with TOP 1 or WHERE 1 = 0 if supported.)
+
+Outcomes Recorded
+
+Query success or failure
+
+Column names and order
+
+Column count
+
+Provider-reported data types (when available)
+
+Any driver or provider errors
+
+Tables that fail this phase are marked and skipped, but do not halt execution.
+
+Phase 1 — Full Data Extraction
+Purpose
+
+Extract all rows and all columns for each successfully discovered table.
+
+Query Pattern
+SELECT *
+FROM OPENQUERY(SAGE,
+  'SELECT * FROM <TableName>');
+
+Behavior
+
+Results are streamed sequentially
+
+No assumptions are made about schema
+
+Data is written incrementally to avoid memory pressure
+
+Each table is processed independently
+
+Output Artifacts (per table)
+/exports/<TableName>/
+  data.xlsx
+  schema.json
+  stats.json
+
+data.xlsx
+
+All rows and columns
+
+Column order preserved exactly as returned
+
+No transformations or coercions unless required for XLSX compatibility
+
+schema.json
+
+Column names (ordered)
+
+Column count
+
+Data types (if exposed)
+
+Nullability (if exposed)
+
+stats.json
+
+Start time
+
+End time
+
+Duration
+
+Rows written (total across all sheets)
+
+Sheet breakdown:
+  - Number of sheets
+  - Rows per sheet
+
+Warnings or anomalies
+
+Phase 2 — Verification & Integrity Check
+Purpose
+
+Ensure no data loss and no structural drift occurred during extraction.
+
+Validation Queries
+Row Count Verification
+SELECT COUNT(*)
+FROM OPENQUERY(SAGE,
+  'SELECT * FROM <TableName>');
+
+
+The returned count is compared against the TOTAL number of rows written across ALL sheets in the XLSX file.
+
+For multi-sheet exports:
+  - Sum rows from all sheets (Part1 + Part2 + ... + PartN)
+  - Compare sum to source COUNT(*)
+  - Record per-sheet counts in validation output for transparency
+
+Schema Verification
+
+Column count must match Phase 0
+
+Column names and order must match Phase 0
+
+Validation Outcomes
+
+VERIFIED
+
+ROW_COUNT_MISMATCH
+
+COLUMN_MISMATCH
+
+VALIDATION_FAILED
+
+Validation results are written back into the table manifest.
+
+Execution & Load Management
+Concurrency
+
+Exactly one table at a time
+
+No overlapping database queries
+
+Throttling
+
+Configurable sleep interval between tables
+
+Optional longer pause after:
+
+large tables
+
+high-risk core tables (AR, AP, SO, IM, etc.)
+
+This approach minimizes:
+
+ProvideX contention
+
+cursor exhaustion
+
+driver instability
+
+Failure Handling Philosophy
+
+A failure in one table does not automatically stop the run, but requires user acknowledgment.
+
+Interactive Failure Handling (TUI)
+
+When a table fails during any phase, the tool:
+
+1. Pauses execution and displays a failure summary via ink TUI:
+   - Table name and phase where failure occurred
+   - Error message / classification
+   - Partial extraction stats (if applicable):
+     - Rows successfully extracted before failure
+     - Number of sheets written (if any)
+     - Time elapsed
+
+2. Prompts the user with options:
+   - [C]ontinue - Skip this table, proceed to next
+   - [R]etry - Attempt this table again
+   - [A]bort - Stop the entire run gracefully
+
+3. User decision is logged in the manifest for auditability
+
+All failures are:
+
+logged
+
+classified
+
+recoverable (where possible)
+
+The tool progresses forward through the manifest only after user confirmation.
+
+The result is a best-effort exhaustive extraction with human oversight at failure points.
+
+Deliverables
+
+At completion, the project produces:
+
+A complete XLSX export for all queryable tables
+
+Full schema metadata for every table
+
+Validation results proving completeness
+
+A manifest showing:
+
+what succeeded
+
+what failed
+
+why
+
+This dataset provides a stable foundation for migration, analytics, reverse-engineering, or modernization efforts.
+
+Summary
+
+This project intentionally trades speed and elegance for safety, completeness, and determinism. It treats the Sage / ProvideX environment with appropriate caution while still delivering maximum data value in a single execution window.
+
+This is a controlled extraction, not a blind dump, and it leaves future work with clarity instead of mystery.

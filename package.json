@@ -1,0 +1,35 @@
+{
+  "name": "sage-data-tools",
+  "version": "1.0.0",
+  "description": "Read-only data extraction tool for Sage ERP / ProvideX",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.tsx"
+  },
+  "keywords": [
+    "sage",
+    "providex",
+    "data-extraction",
+    "etl"
+  ],
+  "author": "",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "chalk": "^5.3.0",
+    "dotenv": "^16.4.5",
+    "exceljs": "^4.4.0",
+    "ink": "^5.0.1",
+    "mssql": "^11.0.1",
+    "react": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/mssql": "^9.1.5",
+    "@types/node": "^22.10.2",
+    "@types/react": "^18.3.12",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2"
+  }
+}
