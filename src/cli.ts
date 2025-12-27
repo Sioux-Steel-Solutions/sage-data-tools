@@ -119,11 +119,11 @@ async function main() {
           });
 
           const columns = manifest.tables.find(t => t.name === table.name)?.columns || [];
-          const writer = createExcelWriter(table.name, columns);
+          const writer = await createExcelWriter(table.name, columns);
 
           let rowCount = 0;
           for await (const row of streamTableRows(table.name)) {
-            writeRow(writer, row);
+            await writeRow(writer, row);
             rowCount++;
 
             // Progress update every 10000 rows

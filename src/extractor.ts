@@ -106,11 +106,11 @@ export async function runExtraction(
 
           try {
             const columns = table.columns || [];
-            const writer = createExcelWriter(table.name, columns);
+            const writer = await createExcelWriter(table.name, columns);
 
             let rowCount = 0;
             for await (const row of streamTableRows(table.name)) {
-              writeRow(writer, row);
+              await writeRow(writer, row);
               rowCount++;
 
               // Update progress every 1000 rows

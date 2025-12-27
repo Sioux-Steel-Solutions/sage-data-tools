@@ -1,13 +1,13 @@
 import ExcelJS from 'exceljs';
 import { mkdir } from 'fs/promises';
-import { existsSync } from 'fs';
+import { existsSync, createWriteStream } from 'fs';
 import path from 'path';
 import { config } from './config.js';
 import type { ColumnMetadata, ExtractionStats, SchemaInfo } from './types.js';
 import { writeFile } from 'fs/promises';
 
 export interface ExcelWriterState {
-  workbook: ExcelJS.Workbook;
+  workbook: ExcelJS.stream.xlsx.WorkbookWriter;
   currentSheet: ExcelJS.Worksheet | null;
   tableName: string;
   sheetIndex: number;
@@ -15,15 +15,30 @@ export interface ExcelWriterState {
   totalRowsWritten: number;
   rowsPerSheet: number[];
   columns: ColumnMetadata[];
+  filePath: string;
 }
 
-export function createExcelWriter(
+export async function createExcelWriter(
   tableName: string,
   columns: ColumnMetadata[]
-): ExcelWriterState {
-  const workbook = new ExcelJS.Workbook();
-  workbook.creator = 'Sage Data Extraction Tool';
-  workbook.created = new Date();
+): Promise<ExcelWriterState> {
+  // Ensure export directory exists
+  const tableDir = path.join(config.paths.exports, tableName);
+  if (!existsSync(tableDir)) {
+    await mkdir(tableDir, { recursive: true });
+  }
+
+  const filePath = path.join(tableDir, 'data.xlsx');
+
+  // Use streaming writer to avoid memory issues with large tables
+  const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({
+    filename: filePath,
+    useStyles: true,
+    useSharedStrings: false, // Disabled for better memory performance
+  });
+
+  (workbook as any).creator = 'Sage Data Extraction Tool';
+  (workbook as any).created = new Date();
 
   return {
     workbook,
@@ -34,13 +49,15 @@ export function createExcelWriter(
     totalRowsWritten: 0,
     rowsPerSheet: [],
     columns,
+    filePath,
   };
 }
 
-function createNewSheet(state: ExcelWriterState): void {
-  // Finalize previous sheet row count
+async function createNewSheet(state: ExcelWriterState): Promise<void> {
+  // Finalize previous sheet row count and commit it
   if (state.currentSheet && state.rowsInCurrentSheet > 0) {
     state.rowsPerSheet.push(state.rowsInCurrentSheet);
+    await state.currentSheet.commit();
   }
 
   state.sheetIndex++;
@@ -53,25 +70,23 @@ function createNewSheet(state: ExcelWriterState): void {
   state.rowsInCurrentSheet = 0;
 
   // Add header row
-  state.currentSheet.addRow(state.columns.map((c) => c.name));
-
-  // Style header row
-  const headerRow = state.currentSheet.getRow(1);
+  const headerRow = state.currentSheet.addRow(state.columns.map((c) => c.name));
   headerRow.font = { bold: true };
   headerRow.fill = {
     type: 'pattern',
     pattern: 'solid',
     fgColor: { argb: 'FFE0E0E0' },
   };
+  headerRow.commit();
 }
 
-export function writeRow(
+export async function writeRow(
   state: ExcelWriterState,
   row: Record<string, unknown>
-): void {
+): Promise<void> {
   // Create first sheet or new sheet if at limit
   if (!state.currentSheet || state.rowsInCurrentSheet >= config.xlsx.maxRowsPerSheet) {
-    createNewSheet(state);
+    await createNewSheet(state);
   }
 
   const values = state.columns.map((col) => {
@@ -83,7 +98,8 @@ export function writeRow(
     return value;
   });
 
-  state.currentSheet!.addRow(values);
+  const dataRow = state.currentSheet!.addRow(values);
+  dataRow.commit();
   state.rowsInCurrentSheet++;
   state.totalRowsWritten++;
 }
@@ -91,19 +107,16 @@ export function writeRow(
 export async function finalizeExcel(
   state: ExcelWriterState
 ): Promise<{ filePath: string; stats: ExtractionStats }> {
-  // Record final sheet's row count
-  if (state.rowsInCurrentSheet > 0) {
-    state.rowsPerSheet.push(state.rowsInCurrentSheet);
+  // Commit final sheet and record row count
+  if (state.currentSheet) {
+    if (state.rowsInCurrentSheet > 0) {
+      state.rowsPerSheet.push(state.rowsInCurrentSheet);
+    }
+    await state.currentSheet.commit();
   }
 
-  // Ensure export directory exists
-  const tableDir = path.join(config.paths.exports, state.tableName);
-  if (!existsSync(tableDir)) {
-    await mkdir(tableDir, { recursive: true });
-  }
-
-  const filePath = path.join(tableDir, 'data.xlsx');
-  await state.workbook.xlsx.writeFile(filePath);
+  // Commit the workbook (finalizes the streaming write)
+  await state.workbook.commit();
 
   const stats: ExtractionStats = {
     tableName: state.tableName,
@@ -116,7 +129,7 @@ export async function finalizeExcel(
     warnings: [],
   };
 
-  return { filePath, stats };
+  return { filePath: state.filePath, stats };
 }
 
 export async function writeSchemaFile(
