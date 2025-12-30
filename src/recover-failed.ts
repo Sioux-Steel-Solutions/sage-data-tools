@@ -64,34 +64,41 @@ const DATE_COLUMNS: Record<string, string[]> = {
   ],
 };
 
-function buildSafeSelectQuery(tableName: string, columns: Array<{ name: string; type: string }>): string {
+function buildSafeSelectQuery(
+  tableName: string,
+  columns: Array<{ name: string; type: string }>
+): { query: string; includedColumns: Array<{ name: string; type: string }> } {
   const linkedServer = config.sql.linkedServer;
+  const knownDateCols = DATE_COLUMNS[tableName] || [];
 
-  // Build a SELECT that casts date columns to varchar
-  const columnSelects = columns.map(col => {
+  // Filter out problematic date columns - ProvideX ODBC doesn't support CAST
+  const safeColumns = columns.filter(col => {
     const colName = col.name;
-    const colType = col.type.toLowerCase();
+    const colType = (col.type || '').toLowerCase();
 
-    // Cast date/datetime types to varchar to avoid conversion errors
-    if (colType.includes('date') || colType.includes('time')) {
-      return `CAST([${colName}] AS VARCHAR(50)) AS [${colName}]`;
-    }
-    return `[${colName}]`;
+    // Check if this is a known date column or looks like one
+    const isDateColumn = knownDateCols.includes(colName) ||
+      colType.includes('date') ||
+      colName.toLowerCase().includes('date');
+
+    // Skip date columns entirely - they're corrupted
+    return !isDateColumn;
   });
 
-  const selectList = columnSelects.join(', ');
-  return `SELECT * FROM OPENQUERY(${linkedServer}, 'SELECT ${selectList} FROM ${tableName}')`;
+  const selectList = safeColumns.map(c => c.name).join(', ');
+  const query = `SELECT * FROM OPENQUERY(${linkedServer}, 'SELECT ${selectList} FROM ${tableName}')`;
+
+  return { query, includedColumns: safeColumns };
 }
 
 async function* streamTableRowsSafe(
   tableName: string,
-  columns: Array<{ name: string; type: string }>
+  query: string
 ): AsyncGenerator<Record<string, unknown>, void, unknown> {
   const conn = await connect();
   const request = conn.request();
   request.stream = true;
 
-  const query = buildSafeSelectQuery(tableName, columns);
   console.log(chalk.gray(`  Query: ${query.substring(0, 100)}...`));
 
   request.query(query);
@@ -158,19 +165,21 @@ async function recoverTable(tableName: string): Promise<{ success: boolean; rowC
   console.log(chalk.yellow(`\nRecovering ${tableName}...`));
 
   try {
-    // Get column information
-    console.log(chalk.gray('  Getting column metadata...'));
-    const columnInfo = await getColumnInfo(tableName);
+    // Get column information from manifest
+    console.log(chalk.gray('  Getting column metadata from manifest...'));
+    const columnInfo = await getColumnInfoFromManifest(tableName);
     console.log(chalk.gray(`  Found ${columnInfo.length} columns`));
 
-    // Count date columns
-    const dateColumns = columnInfo.filter(c =>
-      c.type.toLowerCase().includes('date') || c.type.toLowerCase().includes('time')
-    );
-    console.log(chalk.gray(`  Date columns to cast: ${dateColumns.map(c => c.name).join(', ')}`));
+    // Build safe query excluding problematic date columns
+    const { query, includedColumns } = buildSafeSelectQuery(tableName, columnInfo);
 
-    // Create column metadata for excel writer
-    const columns: ColumnMetadata[] = columnInfo.map((col, index) => ({
+    // Count excluded date columns
+    const excludedCount = columnInfo.length - includedColumns.length;
+    console.log(chalk.yellow(`  Excluding ${excludedCount} date columns (corrupted data)`));
+    console.log(chalk.gray(`  Will extract ${includedColumns.length} columns`));
+
+    // Create column metadata for excel writer (only included columns)
+    const columns: ColumnMetadata[] = includedColumns.map((col, index) => ({
       name: col.name,
       index,
       type: col.type,
@@ -182,7 +191,7 @@ async function recoverTable(tableName: string): Promise<{ success: boolean; rowC
 
     // Stream rows with safe query
     let rowCount = 0;
-    for await (const row of streamTableRowsSafe(tableName, columnInfo)) {
+    for await (const row of streamTableRowsSafe(tableName, query)) {
       await writeRow(writer, row);
       rowCount++;
 
